@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scrool Prototype</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" integrity="sha512-9usAa10IRO0HhonpyAIVpjrylPvoDwiPUiKdWk5t3PyolY1cOd4DSE0Ga+ri4AuTroPR5aQvXU9xC6qOPnzFeg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <!-- Firebase SDKs (Add these) -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-auth-compat.js"></script>
+</head>
+<body>
+    <!-- Simple Auth Controls Area -->
+    <div id="auth-controls" style="position: fixed; top: 10px; right: 10px; z-index: 100; background: rgba(0,0,0,0.7); padding: 8px; border-radius: 5px;">
+        <button id="login-button" style="display: none; background-color: #4285F4; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Login with Google</button>
+        <div id="user-info" style="display: none; color: white; font-size: 0.9em;">
+            <span id="user-email"></span>
+            <button id="logout-button" style="margin-left: 10px; background-color: #eee; color: #333; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 0.9em;">Logout</button>
+        </div>
+    </div>
+
+    <div class="app-container">
+
+        <!-- Initial Slide (Template) -->
+        <div class="video-slide" data-slide-index="0">
+            <div class="video-container">
+                <button class="video-overlay-button mute-button">
+                    <i class="fas fa-volume-mute"></i>
+                </button>
+                <button class="video-overlay-button like-button" aria-label="Like/Unlike">
+                    <i class="far fa-heart"></i>
+                    <span class="like-count">0</span>
+                </button>
+                <video class="video-player" playsinline controlsList="nodownload" loop preload="metadata">
+                </video>
+                
+                <div class="play-indicator">
+                    <i class="fas fa-play"></i>
+                </div>
+
+                <div class="controls">
+                    <input type="range" class="scrub-bar" value="0" step="0.1">
+                </div>
+                <div class="video-info">
+                    <h3 class="video-title">Loading title...</h3>
+                    <div class="creator-info">
+                        <div class="pfp-placeholder"></div> 
+                        <span class="video-creator">@loading...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        -->
+
+        <!-- Slides will be added dynamically by JS here -->
+
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html> 
