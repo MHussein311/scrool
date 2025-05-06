@@ -11,8 +11,8 @@ scrool-60f79-firebase-adminsdk-fbsvc-763a65bfac.json
 *.sqlite
 *.sqlite3
 
-# Optional: Add database file if you don't want to commit it
-# database.db
+# Video files directory
+backend/videos/
 
 # Optional: VS Code settings
 .vscode/
