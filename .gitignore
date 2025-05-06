@@ -6,6 +6,13 @@ scrool-60f79-firebase-adminsdk-fbsvc-763a65bfac.json
 
 # Optional: Add database file if you don't want to commit it
 # database.db
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Optional: Add database file if you don't want to commit it
+# database.db
 
 # Optional: VS Code settings
 .vscode/

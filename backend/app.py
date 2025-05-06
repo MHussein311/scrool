@@ -42,7 +42,9 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS video_stats (
                 filename TEXT PRIMARY KEY,
-                like_count INTEGER DEFAULT 0
+                like_count INTEGER DEFAULT 0,
+                title TEXT,
+                creator TEXT
             )
         ''')
         # Table to store which user liked which video
@@ -55,6 +57,61 @@ def init_db():
         ''')
         db.commit()
         print("Database initialized (video_stats and user_likes tables).")
+        
+        # --- Ensure Columns Exist (Handle Schema Evolution) --- 
+        print("Checking/Adding columns to video_stats...")
+        try:
+            # Check existing columns
+            cursor.execute("PRAGMA table_info(video_stats)")
+            columns = [info[1] for info in cursor.fetchall()] # Get column names (index 1)
+            
+            if 'title' not in columns:
+                print("  Adding 'title' column...")
+                cursor.execute("ALTER TABLE video_stats ADD COLUMN title TEXT")
+            else:
+                 print("  'title' column already exists.")
+                
+            if 'creator' not in columns:
+                 print("  Adding 'creator' column...")
+                 cursor.execute("ALTER TABLE video_stats ADD COLUMN creator TEXT")
+            else:
+                 print("  'creator' column already exists.")
+                 
+            db.commit() # Commit schema changes
+            print("Column check/addition complete.")
+        except sqlite3.Error as alter_err:
+             print(f"Database error altering table: {alter_err}")
+             # If altering fails, we probably shouldn't continue with population
+             # For robustness, maybe skip population if alter fails?
+             # For now, we'll let it try and potentially fail again.
+        # --- End Schema Check/Alter ---
+
+        # --- Populate/Update video_stats from metadata.json --- 
+        print("Attempting to populate video_stats table from metadata.json...")
+        metadata_content = {}
+        try:
+            with open(METADATA_FILE, 'r') as f:
+                metadata_content = json.load(f)
+                print(f"Successfully loaded {METADATA_FILE}.")
+        except FileNotFoundError:
+            print(f"Warning: {METADATA_FILE} not found. Cannot populate title/creator.")
+        except json.JSONDecodeError:
+            print(f"Warning: Could not decode JSON from {METADATA_FILE}. Cannot populate title/creator.")
+        
+        if metadata_content:
+            for filename, meta in metadata_content.items():
+                ensure_video_stat_exists(cursor, filename) # Ensure row exists
+                try:
+                    cursor.execute("UPDATE video_stats SET title = ?, creator = ? WHERE filename = ?", 
+                                   (meta.get('title', 'Unknown Title'), meta.get('creator', '@unknown_creator'), filename))
+                except sqlite3.Error as update_err:
+                     print(f"  Error updating metadata for {filename}: {update_err}")
+            db.commit() # Commit after processing all entries
+            print(f"Finished populating/updating video_stats from {len(metadata_content)} metadata entries.")
+        else:
+            print("No metadata found in metadata.json to populate.")
+        # --- End Population --- 
+
         # Pre-populate stats if needed (optional)
         # populate_initial_stats(cursor)
         # db.commit()
@@ -144,20 +201,6 @@ def update_like_status(user_id, filename, action):
             db.close()
 
 
-# --- Metadata Loading ---
-def load_metadata():
-    try:
-        with open(METADATA_FILE, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"Error: {METADATA_FILE} not found.")
-        return {}
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON from {METADATA_FILE}.")
-        return {}
-
-metadata = load_metadata()
-
 # Helper to get user ID from Authorization header
 def get_user_id_from_request(request):
     user_id = None
@@ -196,31 +239,53 @@ def get_all_videos():
 
     user_id = get_user_id_from_request(request)
     
-    # --- Get total list of valid filenames FIRST --- 
-    try: 
-        all_video_files = sorted([f for f in os.listdir(VIDEO_DIR) 
-                            if os.path.isfile(os.path.join(VIDEO_DIR, f)) and f.lower().endswith('.mp4')])
-    except FileNotFoundError:
-         abort(500, description="Video directory not found on server.")
-    
-    total_videos = len(all_video_files)
-    total_pages = ceil(total_videos / limit) if limit > 0 else 1
-    
-    # --- Get the slice for the current page --- 
-    videos_for_page = all_video_files[offset : offset + limit]
-    
-    # --- Process ONLY the videos for the current page --- 
+    # --- Query Database for Paginated Video Data ---
     videos_data = []
-    for filename in videos_for_page:
-        video_meta = metadata.get(filename, {}) 
-        details = get_video_details(filename, user_id) # Still need DB query per item
-        videos_data.append({
-            'filename': filename,
-            'title': video_meta.get('title', 'Unknown Title'),
-            'creator': video_meta.get('creator', '@unknown_creator'),
-            'like_count': details['like_count'],
-            'is_liked_by_user': details['is_liked_by_user']
-        })
+    total_videos = 0
+    total_pages = 1
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Get total count first
+        cursor.execute("SELECT COUNT(*) FROM video_stats")
+        count_result = cursor.fetchone()
+        total_videos = count_result[0] if count_result else 0
+        total_pages = ceil(total_videos / limit) if limit > 0 else 1
+
+        # Construct the main query with JOIN for like status
+        # Use COALESCE for potentially NULL title/creator from DB
+        query = """
+            SELECT 
+                vs.filename, 
+                COALESCE(vs.title, 'Unknown Title') as title, 
+                COALESCE(vs.creator, '@unknown_creator') as creator, 
+                vs.like_count, 
+                CASE WHEN ul.user_id IS NOT NULL THEN 1 ELSE 0 END as is_liked_by_user
+            FROM video_stats vs
+            LEFT JOIN user_likes ul ON vs.filename = ul.filename AND ul.user_id = ?
+            ORDER BY RANDOM() -- <<< Return videos in random order for initial load too
+            LIMIT ? OFFSET ?
+        """
+        # Use None for user_id in the query if not logged in
+        cursor.execute(query, (user_id, limit, offset))
+        results = cursor.fetchall()
+        
+        for row in results:
+            videos_data.append({
+                'filename': row['filename'],
+                'title': row['title'],
+                'creator': row['creator'],
+                'like_count': row['like_count'],
+                'is_liked_by_user': bool(row['is_liked_by_user']) # Convert 1/0 to True/False
+            })
+            
+    except sqlite3.Error as e:
+        print(f"Database error fetching paginated videos: {e}")
+        abort(500, description="Error retrieving video list.")
+    finally:
+        if db: db.close()
+    # --- End DB Query ---
 
     # Optional: Shuffle the current page results? 
     # random.shuffle(videos_data) 
@@ -258,27 +323,70 @@ def get_video_file(filename):
 @app.route('/next_video', methods=['POST'])
 def get_next_video():
     user_id = get_user_id_from_request(request)
-    exclude_list = request.json.get('exclude', [])
     # Filter for .mp4 files specifically (case-insensitive) AND exclude watched ones
-    available_files = [f for f in os.listdir(VIDEO_DIR) 
-                       if os.path.isfile(os.path.join(VIDEO_DIR, f)) 
-                       and f.lower().endswith('.mp4') 
-                       and f not in exclude_list]
+    # --- Get ALL filenames from database ---
+    all_files = []
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT filename FROM video_stats")
+        all_files = [row['filename'] for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        print(f"Database error fetching all filenames for /next_video: {e}")
+        # Return an error if we can't even get the list
+        abort(500, description="Database error retrieving video list.")
+    finally:
+        if db: db.close()
+    # --- End DB Query ---
 
-    if not available_files:
+    if not all_files:
+        # If the database is empty, return nothing
         return jsonify({'filename': None, 'title': None, 'creator': None, 'like_count': 0, 'is_liked_by_user': False}), 200 # Indicate no more videos
 
-    next_filename = random.choice(available_files)
-    video_meta = metadata.get(next_filename, {})
-    details = get_video_details(next_filename, user_id) # Get count and user like status
+    # --- Pick a random video from the full list ---
+    next_filename = random.choice(all_files)
 
-    return jsonify({
-        'filename': next_filename,
-        'title': video_meta.get('title', 'Unknown Title'),
-        'creator': video_meta.get('creator', '@unknown_creator'),
-        'like_count': details['like_count'],
-        'is_liked_by_user': details['is_liked_by_user']
-    })
+    # --- Fetch full details for the chosen video from DB ---
+    full_details = {}
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        query = """
+            SELECT 
+                vs.filename, 
+                COALESCE(vs.title, 'Unknown Title') as title, 
+                COALESCE(vs.creator, '@unknown_creator') as creator, 
+                vs.like_count, 
+                CASE WHEN ul.user_id IS NOT NULL THEN 1 ELSE 0 END as is_liked_by_user
+            FROM video_stats vs
+            LEFT JOIN user_likes ul ON vs.filename = ul.filename AND ul.user_id = ?
+            WHERE vs.filename = ?
+        """
+        cursor.execute(query, (user_id, next_filename))
+        result_row = cursor.fetchone()
+        if result_row:
+            full_details = {
+                'filename': result_row['filename'],
+                'title': result_row['title'],
+                'creator': result_row['creator'],
+                'like_count': result_row['like_count'],
+                'is_liked_by_user': bool(result_row['is_liked_by_user'])
+            }
+        else:
+            # This shouldn't happen if we selected from video_stats, but handle defensively
+            print(f"Error: Could not find details for selected filename {next_filename} in DB.")
+            # Return defaults or an error?
+            full_details = {'filename': next_filename, 'title': 'Error Finding Title', 'creator': 'Error', 'like_count': 0, 'is_liked_by_user': False}
+
+    except sqlite3.Error as e:
+        print(f"Database error fetching details for {next_filename}: {e}")
+        # Return defaults or an error?
+        full_details = {'filename': next_filename, 'title': 'DB Error Title', 'creator': 'Error', 'like_count': 0, 'is_liked_by_user': False}
+    finally:
+        if db: db.close()
+    # --- End DB Query ---
+
+    return jsonify(full_details)
 
 @app.route('/video_details/<filename>', methods=['GET'])
 def get_specific_video_details(filename):
@@ -296,18 +404,44 @@ def get_specific_video_details(filename):
     # Get user ID for like status
     user_id = get_user_id_from_request(request)
     
-    # Get metadata and like details
-    video_meta = metadata.get(filename, {}) # Get from loaded metadata
-    details = get_video_details(filename, user_id) # Get from DB
+    # --- Query DB for full details ---
+    full_details = {}
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        query = """
+            SELECT 
+                vs.filename, 
+                COALESCE(vs.title, 'Unknown Title') as title, 
+                COALESCE(vs.creator, '@unknown_creator') as creator, 
+                vs.like_count, 
+                CASE WHEN ul.user_id IS NOT NULL THEN 1 ELSE 0 END as is_liked_by_user
+            FROM video_stats vs
+            LEFT JOIN user_likes ul ON vs.filename = ul.filename AND ul.user_id = ?
+            WHERE vs.filename = ?
+        """
+        cursor.execute(query, (user_id, filename))
+        result_row = cursor.fetchone()
+        if result_row:
+            full_details = {
+                'filename': result_row['filename'],
+                'title': result_row['title'],
+                'creator': result_row['creator'],
+                'like_count': result_row['like_count'],
+                'is_liked_by_user': bool(result_row['is_liked_by_user'])
+            }
+        else:
+            # If file exists but no DB entry, return 404? Or defaults?
+            abort(404, description="Video metadata not found in database.") 
 
-    # Construct response similar to /next_video
-    return jsonify({
-        'filename': filename,
-        'title': video_meta.get('title', 'Unknown Title'),
-        'creator': video_meta.get('creator', '@unknown_creator'),
-        'like_count': details['like_count'],
-        'is_liked_by_user': details['is_liked_by_user']
-    })
+    except sqlite3.Error as e:
+        print(f"Database error fetching details for {filename}: {e}")
+        abort(500, description="Database error fetching video details.")
+    finally:
+        if db: db.close()
+    # --- End DB Query ---
+
+    return jsonify(full_details)
 
 @app.route('/videos/<filename>/like', methods=['POST'])
 def like_video(filename):

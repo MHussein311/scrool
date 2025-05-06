@@ -14,15 +14,21 @@
     <!-- Simple Auth Controls Area -->
     <div id="auth-controls" style="position: fixed; top: 10px; right: 10px; z-index: 100; background: rgba(0,0,0,0.7); padding: 8px; border-radius: 5px;">
         <button id="login-button" style="display: none; background-color: #4285F4; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Login with Google</button>
-        <div id="user-info" style="display: none; color: white; font-size: 0.9em;">
-            <span id="user-email"></span>
-            <button id="logout-button" style="margin-left: 10px; background-color: #eee; color: #333; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 0.9em;">Logout</button>
+        <!-- This div is shown when logged in -->
+        <div id="user-info" style="display: none;"> <!-- Remove inline styles if handled by CSS -->
+            <img id="user-pfp" src="" alt="User PFP">
+            <!-- Dropdown is positioned relative to user-info -->
+            <div id="auth-dropdown">
+                <button id="dropdown-logout">Logout</button>
+                <!-- Add Settings button here later -->
+            </div>
         </div>
     </div>
 
     <div class="app-container">
 
-        <!-- Initial Slide (Template) -->
+        <!-- Initial Slide (Template - Removed static content as JS creates slides) -->
+        <!-- 
         <div class="video-slide" data-slide-index="0">
             <div class="video-container">
                 <button class="video-overlay-button mute-button">

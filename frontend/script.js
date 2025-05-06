@@ -36,6 +36,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // const players = document.querySelectorAll('.video-player');
     // const muteButtons = document.querySelectorAll('.mute-button');
     // const scrubBars = document.querySelectorAll('.scrub-bar');
+    const userPfpElement = document.getElementById('user-pfp'); // <<< NEW
+    const authDropdown = document.getElementById('auth-dropdown'); // <<< NEW
+    const dropdownLogoutButton = document.getElementById('dropdown-logout'); // <<< NEW
 
     // --- State Variables ---
     const API_BASE_URL = 'http://localhost:5000';
@@ -55,6 +58,228 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentIdToken = null; // Store current user's ID token
     let currentPage = 1;
     let totalPages = 1;
+    const SLIDE_POOL_SIZE = 5; // <<< NEW: Number of DOM elements to recycle
+    let slidePool = []; // <<< NEW: Array to hold the recyclable slide elements
+    let virtualScrollPosition = 0; // <<< NEW: Tracks the top of the viewport in the virtual list
+    let scrollTimeout = null; // For debouncing scroll events
+
+    // --- Debounce Utility ---
+    function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
+
+    // --- NEW Helper: Create Slide Structure ---
+    // Creates the empty DOM structure for a slide, to be put in the pool.
+    // Returns the created slide element.
+    function createSlideStructure(poolIndex) {
+        console.log(`--- DEBUG: createSlideStructure for pool index ${poolIndex}`);
+        // --- Create Elements Programmatically ---
+        const newSlide = document.createElement('div');
+        newSlide.classList.add('video-slide');
+        newSlide.dataset.poolIndex = poolIndex; // Identify its position in the pool
+
+        // Add placeholder styles for initial layout
+        newSlide.style.width = '100%';
+        newSlide.style.position = 'absolute'; // Needed for virtualization positioning later
+        newSlide.style.top = `${poolIndex * 100}vh`; // Basic initial positioning
+
+        const videoWrapper = document.createElement('div');
+        videoWrapper.classList.add('video-wrapper');
+
+        const player = document.createElement('video');
+        player.classList.add('video-player');
+        player.setAttribute('playsinline', ''); // Important for mobile
+        player.setAttribute('webkit-playsinline', ''); // iOS Safari
+        // player.loop = true; // Set during content update
+        player.preload = 'metadata'; // Good default
+
+        const videoOverlay = document.createElement('div');
+        videoOverlay.classList.add('video-overlay');
+
+        const videoInfo = document.createElement('div');
+        videoInfo.classList.add('video-info');
+
+        const pfpPlaceholder = document.createElement('div');
+        pfpPlaceholder.classList.add('pfp-placeholder');
+
+        const textInfo = document.createElement('div');
+        textInfo.classList.add('text-info');
+
+        const titleElement = document.createElement('h3');
+        titleElement.classList.add('video-title');
+        // titleElement.textContent = "Loading Title..."; // Placeholder
+
+        const creatorElement = document.createElement('p');
+        creatorElement.classList.add('video-creator');
+        // creatorElement.textContent = "@loading..."; // Placeholder
+
+        textInfo.appendChild(titleElement);
+        textInfo.appendChild(creatorElement);
+        videoInfo.appendChild(pfpPlaceholder);
+        videoInfo.appendChild(textInfo);
+
+        const muteButton = document.createElement('button');
+        muteButton.classList.add('mute-button');
+        muteButton.innerHTML = '<i class="fas fa-volume-mute"></i>';
+
+        const likeButton = document.createElement('button');
+        likeButton.classList.add('like-button');
+        const likeIcon = document.createElement('i');
+        likeIcon.classList.add('far', 'fa-heart');
+        const likeCountElement = document.createElement('span');
+        likeCountElement.classList.add('like-count');
+        likeButton.appendChild(likeIcon);
+        likeButton.appendChild(likeCountElement);
+
+        const scrubBar = document.createElement('input');
+        scrubBar.type = 'range';
+        scrubBar.classList.add('scrub-bar');
+        scrubBar.min = '0';
+        scrubBar.max = '100';
+        scrubBar.value = '0';
+        scrubBar.step = '0.1';
+
+        const playIndicator = document.createElement('div');
+        playIndicator.classList.add('play-indicator');
+        playIndicator.innerHTML = '<i class="fas fa-play"></i>';
+
+        videoOverlay.appendChild(videoInfo);
+        videoOverlay.appendChild(muteButton);
+        videoOverlay.appendChild(likeButton);
+        videoOverlay.appendChild(scrubBar);
+        videoOverlay.appendChild(playIndicator);
+
+        videoWrapper.appendChild(player);
+        videoWrapper.appendChild(videoOverlay);
+        newSlide.appendChild(videoWrapper);
+        // --- End Element Creation ---
+
+        // --- Don't set content here, just structure ---
+
+        // Call resize functions AFTER appending? Or maybe better after content update?
+        // Let's skip them here. They will be called by updateSlideContent.
+
+        return newSlide;
+    }
+    // --- End NEW Helper ---
+
+    // --- NEW: Update Slide Content Function ---
+    function updateSlideContent(slideElement, videoData, dataIndex) {
+        console.log(`--- DEBUG: updateSlideContent called for slideElement index ${slideElement.dataset.poolIndex}, dataIndex ${dataIndex}`);
+
+        // --- Find elements within this specific slideElement ---
+        // Moved element finding higher to use them for resets
+        const player = slideElement.querySelector('.video-player');
+        const titleElement = slideElement.querySelector('.video-title');
+        const creatorElement = slideElement.querySelector('.video-creator');
+        const likeButton = slideElement.querySelector('.like-button');
+        const likeIcon = likeButton?.querySelector('i');
+        const likeCountElement = likeButton?.querySelector('.like-count');
+        const muteButton = slideElement.querySelector('.mute-button');
+        const scrub = slideElement.querySelector('.scrub-bar');
+        const pfpPlaceholder = slideElement.querySelector('.pfp-placeholder');
+        const playIndicator = slideElement.querySelector('.play-indicator');
+        const videoInfo = slideElement.querySelector('.video-info');
+
+        // --- Reset Temporary UI States & Timers --- <<< NEW
+        console.log(`--- DEBUG: Resetting UI state for pool index ${slideElement.dataset.poolIndex}`);
+        if (playIndicator) playIndicator.classList.remove('visible');
+        if (scrub) scrub.classList.remove('visible');
+        if (videoInfo) videoInfo.classList.remove('info-active');
+        if (titleElement) titleElement.classList.remove('title-expanded');
+
+        // Clear timers
+        if (slideElement.hideControlsTimer) {
+            clearTimeout(slideElement.hideControlsTimer);
+            slideElement.hideControlsTimer = null;
+        }
+        if (videoInfo && videoInfo.hideTimer) {
+            clearTimeout(videoInfo.hideTimer);
+            videoInfo.hideTimer = null;
+        }
+        // --- End Resets ---
+
+        if (!videoData) {
+            console.warn(`updateSlideContent: No video data provided for dataIndex ${dataIndex}. Hiding slide?`);
+            // Optionally hide the slide element or show a placeholder
+            slideElement.style.display = 'none'; // Example: Hide it
+            return;
+        }
+         slideElement.style.display = ''; // Ensure it's visible if previously hidden
+
+        // Store the data index for reference (e.g., in observer)
+        slideElement.dataset.dataIndex = dataIndex;
+
+        const { filename, title, creator } = videoData;
+        console.log(`--- DEBUG: Updating slide content for pool index ${slideElement.dataset.poolIndex} with data for ${filename} (dataIndex ${dataIndex})`);
+
+        // Check required elements again after potential early exit
+        if (!player || !titleElement || !creatorElement || !likeButton || !likeIcon || !likeCountElement || !muteButton || !scrub || !pfpPlaceholder || !playIndicator || !videoInfo) {
+            console.error(`updateSlideContent: Missing one or more child elements in slide for pool index ${slideElement.dataset.poolIndex}, dataIndex ${dataIndex}`);
+            return;
+        }
+
+        // --- Update Content ---
+        // 1. Video Source (handle carefully)
+        const currentSrc = player.currentSrc || player.src;
+        const newSrc = `${API_BASE_URL}/videos/${filename}`;
+        if (!currentSrc || !currentSrc.endsWith(filename)) {
+            console.log(`Updating video source for pool index ${slideElement.dataset.poolIndex} to ${filename}`);
+            player.pause();
+            player.removeAttribute('src');
+            player.load(); // Reset
+            player.src = newSrc;
+            player.load(); // Load new source
+        } else {
+            console.log(`Video source for pool index ${slideElement.dataset.poolIndex} already set to ${filename}. Skipping source update.`);
+        }
+        player.loop = true; // Ensure loop is set
+        player.muted = userMutedPreference; // Apply mute preference
+
+        // 2. Title and Creator
+        titleElement.textContent = title || "Unknown Title";
+        creatorElement.textContent = creator || "@unknown_creator";
+
+        // 3. Like Button State & Count (use videoStats)
+        const stats = videoStats[filename];
+        if (stats) {
+            likeCountElement.textContent = formatLikeCount(stats.like_count);
+            const isLiked = stats.is_liked_by_user;
+            likeButton.classList.toggle('liked', isLiked);
+            likeIcon.classList.toggle('fas', isLiked);
+            likeIcon.classList.toggle('far', !isLiked);
+        } else {
+            likeCountElement.textContent = '0';
+            likeButton.classList.remove('liked');
+            likeIcon.classList.remove('fas');
+            likeIcon.classList.add('far');
+            console.warn(`updateSlideContent: videoStats missing for ${filename}. Defaulting like state.`);
+        }
+
+        // 4. Mute Button State
+        updateSpecificMuteButton(muteButton, userMutedPreference);
+
+        // 5. Scrub Bar Reset
+        resetScrubBar(scrub);
+
+        // 6. Apply Styles (Title Truncation, etc.)
+        // We might need to re-run style updates specifically for this slide
+        updateTitleStyles(); // Re-run for all slides might be inefficient but simple for now
+
+        // 7. Ensure listeners are attached (they should be from pool creation)
+        // attachSingleSlideListeners(slideElement, slideElement.dataset.poolIndex); // Re-attaching might be needed if elements were replaced, but we modified in place
+
+        console.log(`--- DEBUG: updateSlideContent FINISHED for pool index ${slideElement.dataset.poolIndex}, dataIndex ${dataIndex}`);
+    }
+    // --- End NEW Function ---
 
     // --- Authentication Functions ---
     function signInWithGoogle() {
@@ -63,13 +288,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.log("Signed in successfully:", result.user);
                 // Token will be retrieved by onAuthStateChanged
             }).catch((error) => {
-                console.error("Google Sign-In Error:", error);
                 // Handle Errors here.
                 const errorCode = error.code;
                 const errorMessage = error.message;
-                const email = error.email;
-                const credential = error.credential;
-                alert(`Login failed: ${errorMessage}`);
+
+                // Ignore the specific error caused by onAuthStateChanged firing before popup promise resolves
+                if (errorCode === 'auth/cancelled-popup-request') {
+                    console.warn("signInWithPopup cancelled, likely due to rapid state change via onAuthStateChanged. Login likely succeeded.");
+                    return; // Don't show alert for this specific case
+                }
+
+                // Log and alert for other, genuine errors
+                console.error("Google Sign-In Error:", errorCode, errorMessage);
+                alert(`Login failed: ${errorMessage}`); 
             });
     }
 
@@ -88,10 +319,45 @@ document.addEventListener('DOMContentLoaded', () => {
         if (user) {
             // User is signed in.
             currentUser = user;
-            console.log("Auth State Changed: User logged in", currentUser.uid);
-            userEmailSpan.textContent = currentUser.email;
+            console.log("Auth State Changed: User logged in", currentUser.uid, currentUser.photoURL);
+
+            // Explicitly log the photoURL we are trying to use
+            console.log("--- DEBUG: Attempting to set PFP. photoURL from Firebase:", currentUser.photoURL);
+
+            // Update PFP
+            if (userPfpElement) {
+                 if (currentUser.photoURL) {
+                     userPfpElement.src = currentUser.photoURL;
+                     userPfpElement.style.backgroundColor = 'transparent'; // Clear placeholder color
+                 } else {
+                     // Handle case where user has no photoURL (show default/initials)
+                     userPfpElement.src = ''; // Clear src if it was set previously
+                     userPfpElement.style.backgroundColor = '#555'; // Ensure placeholder color
+                     // TODO: Maybe add initials?
+                 }
+                 console.log("--- DEBUG: PFP Element Found. Set src to:", userPfpElement.src, "Set background:", userPfpElement.style.backgroundColor);
+             } else {
+                 console.error("--- DEBUG: userPfpElement with id 'user-pfp' NOT FOUND in the DOM!");
+            }
+
+            if (userInfoDiv) {
             userInfoDiv.style.display = 'flex'; // Show user info/logout
+                console.log("--- DEBUG: Set userInfoDiv display to:", window.getComputedStyle(userInfoDiv).display);
+            } else {
+                 console.error("--- DEBUG: userInfoDiv with id 'user-info' NOT FOUND in the DOM!");
+            }
+
+            if (loginButton) {
             loginButton.style.display = 'none'; // Hide login
+                console.log("--- DEBUG: Set loginButton display to:", window.getComputedStyle(loginButton).display);
+            } else {
+                 console.error("--- DEBUG: loginButton with id 'login-button' NOT FOUND in the DOM!");
+            }
+
+            // Also explicitly hide the old logout button if it exists
+            if (logoutButton) {
+                logoutButton.style.display = 'none';
+            }
 
             try {
                 currentIdToken = await user.getIdToken(true); // Force refresh token
@@ -115,6 +381,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentIdToken = null;
             userInfoDiv.style.display = 'none'; // Hide user info/logout
             loginButton.style.display = 'block'; // Show login
+            // Hide dropdown if it was open
+            if (authDropdown) authDropdown.classList.remove('visible');
 
             // If app was initialized, refresh data for anonymous view
             if (isInitialized) {
@@ -131,7 +399,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Auth Button Listeners ---
     loginButton.addEventListener('click', signInWithGoogle);
-    logoutButton.addEventListener('click', signOutUser);
 
     // --- API Fetch Helper ---
     async function fetchWithAuth(url, options = {}) {
@@ -154,7 +421,78 @@ document.addEventListener('DOMContentLoaded', () => {
         return response;
     }
 
-    // --- Core Functions ---
+    // Fetch the NEXT video filename AND title from backend
+    async function fetchNextVideoData() { // No longer needs excludeList
+        if (isFetching || allVideosLoaded) {
+            console.log(`fetchNextVideoData: Skipping fetch (isFetching: ${isFetching}, allVideosLoaded: ${allVideosLoaded})`);
+            return null;
+        }
+        console.log("Attempting to fetch next video data..."); // Simplified log
+        isFetching = true;
+        try {
+            const response = await fetchWithAuth(`${API_BASE_URL}/next_video`, {
+                method: 'POST',
+                // No body needed anymore, backend picks randomly from all
+            });
+             console.log(`fetchNextVideoData: Response status: ${response.status}`);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            const data = await response.json();
+
+            // Check for filename only, as other fields might be null if no videos left
+            if (data && data.filename) {
+                console.log("Fetched next data:", data);
+                 // Store stats (including like status)
+                 videoStats[data.filename] = {
+                     like_count: data.like_count,
+                     is_liked_by_user: data.is_liked_by_user
+                 };
+                 console.log("Updated videoStats:", videoStats);
+                return data; // Return the whole data object
+            } else {
+                console.log("Backend indicates all videos loaded or incomplete data returned.");
+                allVideosLoaded = true;
+                console.log("--- DEBUG: fetchNextVideoData - Setting allVideosLoaded = true"); // DEBUG
+                return null;
+            }
+        } catch (error) {
+            console.error("Failed to fetch next video data:", error);
+            return null;
+        } finally {
+            isFetching = false;
+             console.log("fetchNextVideoData: Fetch attempt finished.");
+        }
+    }
+
+    // Attempt to load the next video DATA and add to list
+    async function loadNextSlide() { // No longer needs exclude list argument
+        console.log(`loadNextSlide DATA called. allVideosLoaded: ${allVideosLoaded}, isFetching: ${isFetching}`);
+        if (allVideosLoaded || isFetching) {
+            console.log("--- DEBUG: loadNextSlide - Skipping DATA fetch due to allVideosLoaded or isFetching."); // DEBUG
+            return;
+        }
+        // Call fetcher without exclude list
+        const nextVideoData = await fetchNextVideoData();
+        console.log("--- DEBUG: loadNextSlide - Result from fetchNextVideoData:", nextVideoData); // DEBUG
+        if (nextVideoData && nextVideoData.filename) { 
+            // const nextSlideIndex = appContainer.children.length; // <<< OLD INDEXING
+            console.log(`loadNextSlide: Got data ${JSON.stringify(nextVideoData)}, adding to availableVideos.`);
+            // createAndAppendSlide(nextVideoData, nextSlideIndex); // <<< NO LONGER CREATE SLIDE HERE
+            
+            // --- Simply add data to the list --- <<< NEW
+            // Always add the fetched data for infinite scroll, allowing duplicates
+            availableVideos.push(nextVideoData);
+            // videoStats is updated in fetchNextVideoData if needed (though less critical now)
+            console.log("--- DEBUG: Added new video data (allowing duplicates). availableVideos length:", availableVideos.length);
+            // Trigger an update of the visible range to potentially render the new slide if needed
+            updateVisibleRange();
+             // --- End Add Data ---
+             
+        } else {
+            console.log("loadNextSlide: No next video data received, feed end reached likely.");
+             allVideosLoaded = true; // Ensure flag is set
+        }
+    }
+
     async function fetchAvailableVideos(page = 1, limit = 10) { // Add parameters
         console.log(`Fetching video list page ${page}, limit ${limit}...`);
         // Clear previous videos if fetching the first page
@@ -463,9 +801,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!slideElement) return;
         const slideIndex = parseInt(slideElement.dataset.slideIndex, 10);
         
-        if (slideIndex !== activeSlideIndex || !player || !scrub || !isFinite(player.duration) || player.duration === 0) {
+        const slideDataIndex = parseInt(slideElement.dataset.dataIndex, 10);
+
+        // Compare the slide's CURRENT data index with the global active DATA index
+        // Only update the scrub bar if this slide IS the active one
+        if (isNaN(slideDataIndex) || slideDataIndex !== activeSlideIndex || !player || !scrub || !isFinite(player.duration) || player.duration === 0) {
+            // Add a log to see why it might be skipping (temporary debug)
+            // console.log(`--- DEBUG: updateScrubBar - Skipping update for dataIndex ${slideDataIndex} (Active: ${activeSlideIndex}, Player duration: ${player?.duration})`);
              return; 
          }
+        // If we reach here, this IS the active slide, so update its scrub bar
         const percentage = (player.currentTime / player.duration) * 100;
         if (Math.abs(parseFloat(scrub.value) - percentage) > 0.1) {
             scrub.value = percentage;
@@ -535,8 +880,17 @@ document.addEventListener('DOMContentLoaded', () => {
              return;
          }
         
+        // Get the DATA index of the slide that was clicked
+        const clickedSlideElement = player.closest('.video-slide');
+        const clickedDataIndex = parseInt(clickedSlideElement?.dataset.dataIndex, 10);
+
+        if (isNaN(clickedDataIndex)) {
+            console.error("handleClickToPlayPause Error: Could not determine data index of clicked slide!");
+             return;
+         }
+        
         // If it's not the active player, scroll to it. Observer will handle play.
-        if (index !== activeSlideIndex) {
+        if (clickedDataIndex !== activeSlideIndex) {
              console.log(`Clicked non-active slide ${index + 1}, scrolling.`);
              player.closest('.video-slide')?.scrollIntoView({ behavior: 'smooth' });
              return;
@@ -649,9 +1003,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // --- Authentication Check --- >> NEW <<
         if (!currentUser) {
             console.log("User not logged in. Prompting login.");
-            alert("Please log in to like videos.");
-            // Optionally, trigger the login flow directly:
-            // signInWithGoogle();
+            signInWithGoogle(); // <<< Directly trigger Google Sign-In
             return; // Stop the function here
         }
         // --- End Authentication Check ---
@@ -868,346 +1220,223 @@ document.addEventListener('DOMContentLoaded', () => {
         const options = {
             root: appContainer,
             rootMargin: '0px',
-            threshold: 0.6
+            threshold: 0.6 // Keep threshold for triggering play/pause
         };
 
-        // Define observer in the outer scope if not already
         observer = new IntersectionObserver((entries) => {
-            console.log(`--- DEBUG: Intersection Observer Callback Fired (${entries.length} entries) ---`); // DEBUG
+            console.log(`--- DEBUG: Intersection Observer Callback Fired (${entries.length} entries) ---`);
             let bestEntry = null;
+            let maxRatio = 0;
+
             entries.forEach(entry => {
-                 console.log(`--- DEBUG: Observer Entry - Target: ${entry.target.dataset.slideIndex}, Intersecting: ${entry.isIntersecting}, Ratio: ${entry.intersectionRatio.toFixed(2)}`); // DEBUG
-                if (entry.isIntersecting && entry.intersectionRatio >= options.threshold) { // Check threshold here
-                    if (!bestEntry || entry.intersectionRatio > bestEntry.intersectionRatio) {
+                const poolIndex = parseInt(entry.target.dataset.poolIndex, 10);
+                const currentDataIndex = parseInt(entry.target.dataset.dataIndex, 10);
+                console.log(`--- DEBUG: Observer Entry - Pool Index: ${poolIndex}, Data Index: ${isNaN(currentDataIndex) ? 'N/A' : currentDataIndex}, Intersecting: ${entry.isIntersecting}, Ratio: ${entry.intersectionRatio.toFixed(2)}`);
+
+                // Find the most visible slide (highest intersection ratio)
+                if (entry.isIntersecting && entry.intersectionRatio > maxRatio) {
+                    maxRatio = entry.intersectionRatio;
                         bestEntry = entry;
-                    }
-                }
-            });
+                 }
+             });
 
-            if (bestEntry) {
-                const newActiveIndex = parseInt(bestEntry.target.dataset.slideIndex, 10);
-                console.log(`--- DEBUG: Best intersecting entry is Slide ${newActiveIndex + 1}`); // DEBUG
+            // --- Update Visible Slides Content & Position (using scroll event instead for better perf?) ---
+            // For now, let's try updating based on observer triggers. We need a function for this.
+             updateVisibleRange(); // <<< NEW function call to handle content/position updates
 
-                if (newActiveIndex !== activeSlideIndex) {
-                     console.log(`--- DEBUG: Intersection Change - New active slide: ${newActiveIndex + 1}`); // DEBUG
-                    
-                     // --- Update URL Hash --- 
-                     const activePlayerForURL = bestEntry.target.querySelector('.video-player');
-                     const filenameForURL = activePlayerForURL?.currentSrc?.split('/').pop();
-                     if (filenameForURL) {
-                         // Use pushState to change the hash without reloading
-                         // Using just the filename as the hash for simplicity
-                         history.pushState({ videoFilename: filenameForURL }, "", `#${filenameForURL}`);
-                         console.log(`--- DEBUG: Updated URL hash to #${filenameForURL}`);
-                     } else {
-                         // Optionally clear hash or go back to root if filename not found
-                         // history.pushState({}, "", window.location.pathname + window.location.search); 
-                     }
-                     // --- End URL Update ---
-                    
-                    // Pause and Reset previously active video
-                    if (activeSlideIndex !== -1) { 
-                        // Find the *previous* slide element based on the index
-                        const oldSlide = appContainer.querySelector(`[data-slide-index="${activeSlideIndex}"]`);
+            // --- Handle Play/Pause based on Intersection --- 
+            if (bestEntry && maxRatio >= options.threshold) {
+                const bestSlideElement = bestEntry.target;
+                const newDataIndex = parseInt(bestSlideElement.dataset.dataIndex, 10);
+
+                if (!isNaN(newDataIndex) && newDataIndex < availableVideos.length && newDataIndex !== activeSlideIndex) { // Check bounds
+                    console.log(`--- DEBUG: Intersection Change - New active DATA index: ${newDataIndex}`);
+
+                    // Pause previously active video (if any)
+                    if (activeSlideIndex !== -1 && activeSlideIndex < availableVideos.length) {
+                        // Find the slide element *currently displaying* the old active data index
+                        const oldSlide = slidePool.find(slide => parseInt(slide.dataset.dataIndex, 10) === activeSlideIndex);
                         if (oldSlide) {
                             const oldPlayer = oldSlide.querySelector('.video-player');
                             const oldScrub = oldSlide.querySelector('.scrub-bar');
                             if (oldPlayer) {
                                 oldPlayer.pause();
                                 oldPlayer.currentTime = 0; 
-                                console.log(`Paused and Reset player in slide ${activeSlideIndex + 1}`);
+                                console.log(`--- DEBUG: Paused and Reset player for old data index ${activeSlideIndex}`);
                             }
-                            if (oldScrub) {
-                                resetScrubBar(oldScrub); 
-                            }
-                            // Hide play indicator of old slide
+                            if (oldScrub) resetScrubBar(oldScrub);
                             const oldPlayIndicator = oldSlide.querySelector('.play-indicator');
-                            if (oldPlayIndicator) {
-                                oldPlayIndicator.classList.remove('visible');
-                            }
+                            if (oldPlayIndicator) oldPlayIndicator.classList.remove('visible');
                         } else {
-                             console.warn(`Could not find previous slide element for index ${activeSlideIndex}`);
+                             console.log(`--- DEBUG: Could not find slide displaying previous data index ${activeSlideIndex} to pause.`);
                         }
                     }
                     
-                    activeSlideIndex = newActiveIndex;
+                    // Set new active index (Data Index)
+                    activeSlideIndex = newDataIndex;
 
                     // Play the new active video 
-                    const activePlayer = bestEntry.target.querySelector('.video-player');
+                    const activePlayer = bestSlideElement.querySelector('.video-player');
                     if (activePlayer) {
-                         console.log(`--- DEBUG: Observer attempting to play new active slide ${activeSlideIndex + 1}`); // DEBUG
+                        console.log(`--- DEBUG: Observer attempting to play new active data index ${activeSlideIndex}`);
                          activePlayer.muted = userMutedPreference; 
                          attemptPlay(activePlayer);
-                     }
-
-                    // Check if the *last* slide is now intersecting - if so, try loading next
-                     const isLastSlide = bestEntry.target === appContainer.lastElementChild;
-                     console.log(`--- DEBUG: Observer - Is last slide intersecting? ${isLastSlide}. All videos loaded flag: ${allVideosLoaded}`); // DEBUG
-                     if (isLastSlide && !allVideosLoaded) {
-                         console.log("Last slide intersecting, attempting to load next.");
-                         loadNextSlide();
-                     }
-                    
-                    // Ensure play indicator is hidden when playing
-                    const currentPlayIndicator = bestEntry.target.querySelector('.play-indicator');
-                    if(currentPlayIndicator) {
-                        currentPlayIndicator.classList.remove('visible');
+                        // Ensure its play indicator is hidden
+                        const currentPlayIndicator = bestSlideElement.querySelector('.play-indicator');
+                        if (currentPlayIndicator) currentPlayIndicator.classList.remove('visible');
+                    } else {
+                         console.error(`--- DEBUG: Could not find player element for active data index ${activeSlideIndex}`);
                     }
-                } else if (newActiveIndex === activeSlideIndex) {
-                    // Re-focus check - Ensure it's playing
-                    const currentPlayer = bestEntry.target.querySelector('.video-player');
-                    if(currentPlayer && currentPlayer.paused){
-                         console.log(`--- DEBUG: Observer - Re-focus on active slide ${activeSlideIndex + 1}, ensuring play.`); // DEBUG
+
+                    // Update URL Hash
+                    const videoDataForURL = availableVideos[activeSlideIndex];
+                    if (videoDataForURL && videoDataForURL.filename) {
+                        const newQueryParam = `?video=${videoDataForURL.filename}`;
+                        // Only push state if hash actually changes to prevent loop with handleHashChange
+                        if (window.location.search !== newQueryParam) {
+                            history.pushState({ videoFilename: videoDataForURL.filename }, "", newQueryParam);
+                            console.log(`--- DEBUG: Updated URL query param to ${newQueryParam}`);
+                        }
+                    } else {
+                        console.warn(`--- DEBUG: Could not find video data or filename for query param update (dataIndex: ${activeSlideIndex})`);
+                    }
+
+                } else if (!isNaN(newDataIndex) && newDataIndex === activeSlideIndex) {
+                    // Re-focus on the already active slide, ensure it's playing
+                    const currentPlayer = bestSlideElement.querySelector('.video-player');
+                    if (currentPlayer && currentPlayer.paused) {
+                        console.log(`--- DEBUG: Observer - Re-focus on active data index ${activeSlideIndex}, ensuring play.`);
                          attemptPlay(currentPlayer);
                     }
                 }
-            } else {
-                 console.log("--- DEBUG: Observer - No entry met threshold. Current active index:", activeSlideIndex); // DEBUG
-                  // Consider pausing if needed, logic currently disabled
+            } else if (!bestEntry) {
+                // No slide is intersecting significantly - potentially pause the active video?
+                // This might be too aggressive if scrolling fast. Let's leave it playing for now.
+                console.log("--- DEBUG: Observer - No slide is significantly intersecting.");
             }
         }, options);
-        console.log("--- DEBUG: Intersection Observer setup complete. ---"); // DEBUG
+         console.log("--- DEBUG: Intersection Observer setup complete. ---");
         // Initial observation is handled by initializeOrRefreshFeed
     }
 
-    // Fetch the NEXT video filename AND title from backend
-    async function fetchNextVideoData(excludeList = []) { // Accept exclude list
-        if (isFetching || allVideosLoaded) {
-            console.log(`fetchNextVideoData: Skipping fetch (isFetching: ${isFetching}, allVideosLoaded: ${allVideosLoaded})`);
-            return null;
+    // --- NEW: Function to Update Visible Slide Content and Position ---
+    function updateVisibleRange() {
+        if (!appContainer || slidePool.length === 0 || availableVideos.length === 0) {
+            // console.log("updateVisibleRange: Skipping, prerequisites not met.");
+            return;
         }
-        console.log("Attempting to fetch next video data, excluding:", excludeList);
-        isFetching = true;
-        try {
-            const response = await fetchWithAuth(`${API_BASE_URL}/next_video`, {
-                method: 'POST',
-                body: JSON.stringify({ exclude: excludeList }) // Send exclude list
-            });
-             console.log(`fetchNextVideoData: Response status: ${response.status}`);
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            const data = await response.json();
 
-            // Check for filename only, as other fields might be null if no videos left
-            if (data && data.filename) {
-                console.log("Fetched next data:", data);
-                 // Store stats (including like status)
-                 videoStats[data.filename] = {
-                     like_count: data.like_count,
-                     is_liked_by_user: data.is_liked_by_user
-                 };
-                 console.log("Updated videoStats:", videoStats);
-                return data; // Return the whole data object
+        const scrollTop = appContainer.scrollTop;
+        const containerHeight = appContainer.offsetHeight;
+        // Assume uniform slide height - get it from the first pooled element
+        const slideHeight = containerHeight;
+
+        if (slideHeight <= 0) {
+            console.warn("updateVisibleRange: Slide height is 0, cannot calculate range. Skipping.");
+            return;
+        }
+
+        // Calculate the data index range that should be rendered
+        // Add a buffer (e.g., 1 slide above/below visible area) for smoother scrolling
+        const bufferSlides = 1;
+        const firstVisibleDataIndex = Math.floor(scrollTop / slideHeight);
+        const lastVisibleDataIndex = Math.floor((scrollTop + containerHeight - 1) / slideHeight);
+
+        const firstDataIndexToRender = Math.max(0, firstVisibleDataIndex - bufferSlides);
+        const lastDataIndexToRender = Math.min(availableVideos.length - 1, lastVisibleDataIndex + bufferSlides);
+
+        console.log(`--- DEBUG: updateVisibleRange ---`);
+        console.log(`  ScrollTop: ${scrollTop.toFixed(0)}, ViewportH: ${containerHeight}`);
+        console.log(`  SlideHeight: ${slideHeight}`);
+        console.log(`  Visible Data Index Range: ${firstVisibleDataIndex} - ${lastVisibleDataIndex}`);
+        console.log(`  Render Data Index Range: ${firstDataIndexToRender} - ${lastDataIndexToRender}`);
+
+        // --- Loop through slidePool and update content/position --- 
+        const updatedPoolIndices = new Set(); // Keep track of which pool slots we used
+
+        for (let dataIndex = firstDataIndexToRender; dataIndex <= lastDataIndexToRender; dataIndex++) {
+            if (dataIndex >= availableVideos.length) break; // Don't go beyond available data
+
+            const poolIndex = dataIndex % SLIDE_POOL_SIZE;
+            const slideElement = slidePool[poolIndex];
+            const currentSlideDataIndex = parseInt(slideElement.dataset.dataIndex, 10);
+            const videoData = availableVideos[dataIndex];
+
+            // Position the slide correctly based on its dataIndex
+            const paddingHeight = slideHeight * 0.05; // 5vh padding
+            const totalHeightPerSlide = slideHeight + paddingHeight;
+            const expectedTop = dataIndex * totalHeightPerSlide;
+            // Only update position if it's significantly different (performance)
+            if (Math.abs(parseFloat(slideElement.style.top || '0') - expectedTop) > 1) {
+                 console.log(`--- DEBUG: Positioning pool index ${poolIndex} for data index ${dataIndex} at top: ${expectedTop}px`);
+                slideElement.style.top = `${expectedTop}px`;
+            }
+
+            // Update content ONLY if it's not already displaying the correct data
+            if (isNaN(currentSlideDataIndex) || currentSlideDataIndex !== dataIndex) {
+                 console.log(`--- DEBUG: Updating content for pool index ${poolIndex} with new data index ${dataIndex}`);
+                updateSlideContent(slideElement, videoData, dataIndex);
             } else {
-                console.log("Backend indicates all videos loaded or incomplete data returned.");
-                allVideosLoaded = true;
-                console.log("--- DEBUG: fetchNextVideoData - Setting allVideosLoaded = true"); // DEBUG
-                return null;
+                 // Ensure it's visible if it was previously hidden
+                 slideElement.style.display = ''; 
             }
-        } catch (error) {
-            console.error("Failed to fetch next video data:", error);
-            return null;
-        } finally {
-            isFetching = false;
-             console.log("fetchNextVideoData: Fetch attempt finished.");
-        }
-    }
 
-    // Create a new slide element, populate it, and add listeners
-    function createAndAppendSlide(videoData, index) {
-        const { filename, title, creator } = videoData; // Destructure needed data
-        console.log(`--- DEBUG: createAndAppendSlide START for index ${index}, filename ${filename}`); // DEBUG
-
-        // --- Create Elements Programmatically ---
-        const newSlide = document.createElement('div');
-        newSlide.classList.add('video-slide');
-        newSlide.dataset.slideIndex = index;
-
-        const videoWrapper = document.createElement('div');
-        videoWrapper.classList.add('video-wrapper');
-
-        const player = document.createElement('video');
-        player.classList.add('video-player');
-        player.setAttribute('playsinline', ''); // Important for mobile
-        player.setAttribute('webkit-playsinline', ''); // iOS Safari
-        player.loop = true; // Standard behavior for shorts
-        player.preload = 'metadata'; // Changed back from 'auto' to 'metadata'
-        player.src = `${API_BASE_URL}/videos/${filename}`;
-
-        const videoOverlay = document.createElement('div');
-        videoOverlay.classList.add('video-overlay');
-
-        const videoInfo = document.createElement('div');
-        videoInfo.classList.add('video-info');
-
-        const pfpPlaceholder = document.createElement('div');
-        pfpPlaceholder.classList.add('pfp-placeholder'); // You might want to add an <img> later
-
-        const textInfo = document.createElement('div');
-        textInfo.classList.add('text-info');
-
-        const titleElement = document.createElement('h3');
-        titleElement.classList.add('video-title');
-        titleElement.textContent = title || "Unknown Title";
-
-        const creatorElement = document.createElement('p');
-        creatorElement.classList.add('video-creator');
-        creatorElement.textContent = creator || "@unknown_creator";
-
-        textInfo.appendChild(titleElement);
-        textInfo.appendChild(creatorElement);
-        videoInfo.appendChild(pfpPlaceholder);
-        videoInfo.appendChild(textInfo);
-
-        const muteButton = document.createElement('button');
-        muteButton.classList.add('mute-button');
-        muteButton.innerHTML = '<i class="fas fa-volume-mute"></i>'; // Default icon
-
-        const likeButton = document.createElement('button');
-        likeButton.classList.add('like-button');
-        const likeIcon = document.createElement('i');
-        likeIcon.classList.add('far', 'fa-heart'); // Default icon
-        const likeCountElement = document.createElement('span');
-        likeCountElement.classList.add('like-count');
-        likeButton.appendChild(likeIcon);
-        likeButton.appendChild(likeCountElement);
-
-
-        const scrubBar = document.createElement('input');
-        scrubBar.type = 'range';
-        scrubBar.classList.add('scrub-bar');
-        scrubBar.min = '0';
-        scrubBar.max = '100';
-        scrubBar.value = '0';
-        scrubBar.step = '0.1';
-
-        const playIndicator = document.createElement('div');
-        playIndicator.classList.add('play-indicator');
-        playIndicator.innerHTML = '<i class="fas fa-play"></i>';
-
-        videoOverlay.appendChild(videoInfo);
-        videoOverlay.appendChild(muteButton);
-        videoOverlay.appendChild(likeButton);
-        videoOverlay.appendChild(scrubBar);
-        videoOverlay.appendChild(playIndicator);
-
-        videoWrapper.appendChild(player);
-        videoWrapper.appendChild(videoOverlay);
-        newSlide.appendChild(videoWrapper);
-        // --- End Element Creation ---
-
-        console.log(`--- DEBUG: createAndAppendSlide - Elements created for index ${index}`); // DEBUG
-
-        // --- Set Initial Like Button State from videoStats ---
-        const stats = videoStats[filename]; // Get pre-fetched stats
-        if (stats) {
-            likeCountElement.textContent = formatLikeCount(stats.like_count);
-            const isLiked = stats.is_liked_by_user;
-            likeButton.classList.toggle('liked', isLiked);
-            likeIcon.classList.toggle('fas', isLiked); // Solid heart if liked
-            likeIcon.classList.toggle('far', !isLiked); // Outline heart if not liked
-             console.log(`createAndAppendSlide: Set initial like state - Count: ${stats.like_count}, Liked: ${isLiked}`);
-        } else {
-             likeCountElement.textContent = '0'; // Default if stats somehow missing
-             console.warn(`createAndAppendSlide: videoStats missing for ${filename}. Defaulting like count.`);
-        }
-        // --- End Initial Like State ---
-
-        player.load();
-        player.muted = userMutedPreference;
-        console.log(`--- DEBUG: createAndAppendSlide - Player loaded, muted=${player.muted} for index ${index}`); // DEBUG
-
-        attachSingleSlideListeners(newSlide, index); // Includes its own DEBUG log
-
-        console.log(`--- DEBUG: createAndAppendSlide - Appending slide index ${index} to container.`); // DEBUG
-        appContainer.appendChild(newSlide);
-
-        if (observer) { // Check if observer exists before observing
-            console.log(`--- DEBUG: createAndAppendSlide - Observer exists. Observing new slide index ${index}`); // DEBUG
-        observer.observe(newSlide);
-        } else {
-            console.warn(`--- DEBUG: createAndAppendSlide - Observer NOT YET INITIALIZED when trying to observe slide index ${index}`); // DEBUG
+            updatedPoolIndices.add(poolIndex); // Mark this pool index as used/updated
         }
 
-        if (!loadedVideoFilenames.includes(filename)) {
-        loadedVideoFilenames.push(filename);
-        }
-        updateSpecificMuteButton(muteButton, userMutedPreference);
-        // Call resize functions AFTER appending to ensure dimensions are calculated correctly
-        // updateMuteButtonSize(); // <<< COMMENT OUT
-        // updateLikeButtonSize(); // <<< COMMENT OUT
-        // updatePlayIndicatorSize(); // <<< COMMENT OUT
-        updateTitleStyles(); // Keep this one for title/creator/pfp
-        console.log(`--- DEBUG: createAndAppendSlide FINISHED for index ${index}`); // DEBUG
-
-        return newSlide;
-    }
-
-    // Attempt to load the next video and create a slide for it
-    async function loadNextSlide(excludeFromFirstFetch = []) {
-        console.log(`loadNextSlide called. allVideosLoaded: ${allVideosLoaded}, isFetching: ${isFetching}, excludeFromFirstFetch:`, excludeFromFirstFetch);
-        if (allVideosLoaded || isFetching) {
-            console.log("--- DEBUG: loadNextSlide - Skipping due to allVideosLoaded or isFetching."); // DEBUG
-            return;
-        }
-
-        // Combine permanent loaded list with temporary exclusion for this call
-        const currentExcludeList = [...loadedVideoFilenames, ...excludeFromFirstFetch];
-        console.log("--- DEBUG: loadNextSlide - Combined exclude list:", currentExcludeList); // DEBUG
-        
-        const nextVideoData = await fetchNextVideoData(currentExcludeList); // Pass combined list to fetcher
-        console.log("--- DEBUG: loadNextSlide - Result from fetchNextVideoData:", nextVideoData); // DEBUG
-        if (nextVideoData && nextVideoData.filename) { 
-            const nextSlideIndex = appContainer.children.length;
-            console.log(`loadNextSlide: Got data ${JSON.stringify(nextVideoData)}, proceeding to create slide index ${nextSlideIndex}`);
-            createAndAppendSlide(nextVideoData, nextSlideIndex); 
-        } else {
-            console.log("loadNextSlide: No next video data received, not creating slide.");
-        }
-    }
-
-    // --- NEW: Update Play Indicator Size ---
-    function updatePlayIndicatorSize() {
-        console.log("Updating ALL play indicator sizes.");
-        if (!appContainer) {
-            console.error("updatePlayIndicatorSize: appContainer not found!");
-            return;
-        }
-        const containerWidth = appContainer.offsetWidth;
-        if (containerWidth === 0) {
-            console.warn("updatePlayIndicatorSize: Container width is 0, skipping resize.");
-            return;
-        }
-        // Base size on mute button size
-        const muteButtonSize = Math.max(30, containerWidth / 10); 
-        const indicatorSize = muteButtonSize * 1.8; // Approx 2x diameter, adjust as needed
-        const iconFontSize = indicatorSize * 0.4; // Icon size relative to indicator
-        console.log(`Calculated Play Indicator Size: ${indicatorSize}px, Icon Font Size: ${iconFontSize}px`);
-
-        document.querySelectorAll('.play-indicator').forEach(indicator => {
-            if (!indicator) return;
-            indicator.style.width = `${indicatorSize}px`;
-            indicator.style.height = `${indicatorSize}px`;
-            const icon = indicator.querySelector('i');
-            if (icon) {
-                icon.style.fontSize = `${iconFontSize}px`;
+        // Hide any pool elements that weren't updated (i.e., outside the render range)
+        for (let i = 0; i < SLIDE_POOL_SIZE; i++) {
+            if (!updatedPoolIndices.has(i)) {
+                if (slidePool[i].style.display !== 'none') {
+                     console.log(`--- DEBUG: Hiding unused pool index ${i}`);
+                    slidePool[i].style.display = 'none';
+                 }
             }
-        });
+        }
+
+        // --- Load More Data Trigger --- 
+        const loadThreshold = 3; // Load more when within X slides of the end of loaded data
+        if (!allVideosLoaded && !isFetching && (lastDataIndexToRender >= availableVideos.length - loadThreshold)) {
+            console.log(`--- DEBUG: updateVisibleRange - Near end of loaded data (last render index ${lastDataIndexToRender} / total loaded ${availableVideos.length}), triggering loadNextSlide.`);
+            loadNextSlide(); // Fetch next batch of data
+        }
+         console.log(`--- DEBUG: updateVisibleRange FINISHED ---`);
     }
+    // --- End NEW Function ---
 
     // --- Initialization Function (Refactored) ---
     async function initializeOrRefreshFeed() {
-        console.log("--- DEBUG: initializeOrRefreshFeed START --- "); // DEBUG
+        console.log("--- DEBUG: initializeOrRefreshFeed START (Virtualization Version) --- "); // DEBUG
         isInitialized = false; 
-        clearFeed(); 
+        clearFeed(); // clearFeed also needs modification
+
+        // --- Create Fixed Slide Pool --- <<< NEW
+        console.log(`--- DEBUG: Creating slide pool of size ${SLIDE_POOL_SIZE}`);
+        slidePool = []; // Clear any previous pool
+        appContainer.innerHTML = ''; // Clear container before adding pool
+        for (let i = 0; i < SLIDE_POOL_SIZE; i++) {
+            const poolSlideElement = createSlideStructure(i); // Use helper to create base structure
+            if (poolSlideElement) {
+                slidePool.push(poolSlideElement);
+                appContainer.appendChild(poolSlideElement);
+                // Attach listeners ONCE during creation
+                attachSingleSlideListeners(poolSlideElement, i); // Pass pool index for potential debugging
+            } else {
+                 console.error(`Failed to create structure for pool slide index ${i}`);
+            }
+        }
+        console.log("--- DEBUG: Slide pool created and appended.");
+        // --- End Pool Creation ---
 
         let requestedFilename = null;
         let videoDataToLoadFirst = null;
         let initialExcludeList = [];
 
-        // --- Check for initial video hash --- 
-        if (window.location.hash && window.location.hash.length > 1) {
-            requestedFilename = window.location.hash.substring(1);
-            console.log(`--- DEBUG: Found requested filename in URL hash: ${requestedFilename}`);
+        // --- Check for initial video query parameter --- <<< MODIFIED
+        const urlParams = new URLSearchParams(window.location.search);
+        requestedFilename = urlParams.get('video'); // Get ?video=... value
+        if (requestedFilename) {
+             console.log(`--- DEBUG: Found requested filename in query parameter: ${requestedFilename}`);
             // Fetch details for this specific video first
             try {
                 const response = await fetchWithAuth(`${API_BASE_URL}/video_details/${requestedFilename}`);
@@ -1221,7 +1450,7 @@ document.addEventListener('DOMContentLoaded', () => {
                              like_count: videoDataToLoadFirst.like_count,
                              is_liked_by_user: videoDataToLoadFirst.is_liked_by_user
                          };
-                    } else {
+        } else {
                         console.warn(`--- DEBUG: Invalid data from /video_details for ${requestedFilename}. Falling back.`);
                         requestedFilename = null; // Clear request if fetch failed
                     }
@@ -1248,7 +1477,15 @@ document.addEventListener('DOMContentLoaded', () => {
             videoDataToLoadFirst = availableVideos.find(v => v && v.filename); 
             if (videoDataToLoadFirst) {
                 initialExcludeList.push(videoDataToLoadFirst.filename); // Exclude this from next fetch
+            } else {
+                 console.warn("fetchAvailableVideos succeeded but couldn't find a valid first video in the results.");
             }
+        } else {
+            // --- Ensure the hash-loaded video is in availableVideos --- <<< FIX
+            console.log(`--- DEBUG: Adding hash-loaded video (${videoDataToLoadFirst.filename}) to availableVideos array.`);
+            availableVideos = [videoDataToLoadFirst]; // Start the array with the hash video
+            // videoStats were already populated during the fetch
+            // initialExcludeList was already populated
         }
         // --- End initial batch fetch --- 
 
@@ -1259,8 +1496,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
          console.log(`--- DEBUG: initializeOrRefreshFeed - Determined first video: ${videoDataToLoadFirst.filename}`); // DEBUG
         
-        // --- Load the determined first slide --- 
-        const firstSlideElement = createAndAppendSlide(videoDataToLoadFirst, 0); 
+        // --- Populate Initial Slides --- <<< NEW
+        console.log("--- DEBUG: Populating initial slides from fetched data.");
+        for (let i = 0; i < slidePool.length; i++) {
+            // Find the corresponding data. For init, dataIndex matches pool index (i)
+            // This assumes availableVideos is populated correctly before this loop
+            const dataIndex = i; // Simplification for initial load
+            const videoData = availableVideos[dataIndex]; 
+            if (videoData) {
+                updateSlideContent(slidePool[i], videoData, dataIndex);
+        } else {
+                 // Handle cases where there are fewer initial videos than the pool size
+                 updateSlideContent(slidePool[i], null, dataIndex); // Hide unused slides
+                 console.log(`--- DEBUG: No initial data for pool index ${i}. Slide will be hidden.`);
+            }
+        }
+        const firstSlideElement = slidePool[0]; // Reference for potential scroll target
+        // --- End Populate Initial Slides ---
         
         if (!firstSlideElement) {
             console.error("Failed to create the initial slide element.");
@@ -1280,15 +1532,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!observer) {
              console.log("--- DEBUG: initializeOrRefreshFeed - Observer doesn't exist, calling setupIntersectionObserver..."); // DEBUG
              setupIntersectionObserver(); 
-             if (observer) { 
-                 console.log(`--- DEBUG: initializeOrRefreshFeed - Observer created. Observing first slide element.`); // DEBUG
-                 observer.observe(firstSlideElement);
+             if (observer) {
+                 console.log(`--- DEBUG: initializeOrRefreshFeed - Observer created. Observing initial pool slides.`); // DEBUG
+                 slidePool.forEach(slide => observer.observe(slide)); // Observe all pooled slides
          } else {
                  console.error("--- DEBUG: initializeOrRefreshFeed - setupIntersectionObserver failed to create observer!"); // DEBUG
              }
         } else {
-             console.log("--- DEBUG: initializeOrRefreshFeed - Observer already exists, ensuring it observes the new first slide.");
-             observer.observe(firstSlideElement);
+             console.log("--- DEBUG: initializeOrRefreshFeed - Observer already exists. Disconnecting and re-observing pool.");
+             observer.disconnect(); // Stop observing old things
+             slidePool.forEach(slide => observer.observe(slide)); // Observe all pooled slides
         }
         // --- End Observer Setup ---
         
@@ -1296,121 +1549,54 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log("--- DEBUG: initializeOrRefreshFeed - Initialization state set to true."); // DEBUG
 
         // --- Load subsequent videos --- 
-        console.log("--- DEBUG: Scheduling initial loadNextSlide call.");
+        console.log("--- DEBUG: Scheduling initial loadNextSlide DATA call."); // Changed log
         // Use the updated initialExcludeList
-        setTimeout(() => loadNextSlide(initialExcludeList), 250); 
+        // Call loadNextSlide without the exclude list
+        setTimeout(loadNextSlide, 250); // loadNextSlide now just fetches DATA
 
         console.log("--- DEBUG: initializeOrRefreshFeed FINISHED --- "); // DEBUG
     }
 
     function clearFeed() {
-        console.log("Clearing existing video slides...");
-        // Keep the template slide if it exists and is needed for cloning
-        // Or assume the first slide fetched will become the new template
-        const slides = appContainer.querySelectorAll('.video-slide');
-        slides.forEach((slide, index) => {
-             // A simple approach: Remove all slides.
-             // The first slide will be re-created by setupInitialSlide.
-             // Ensure observer stops watching them first!
-             if (observer) observer.unobserve(slide);
-             slide.remove();
-        });
-        activeSlideIndex = -1; // Reset active index
-        loadedVideoFilenames = []; // Reset loaded list
-        // videoStats = {}; // Reset stats cache (already done in fetchAvailableVideos)
-        allVideosLoaded = false;
-        hasAttemptedInitialNextLoad = false;
-        console.log("Feed cleared.");
-    }
-
-    // Ensure resize listener updates both
-    window.addEventListener('resize', () => {
-        // updateMuteButtonSize(); // <<< COMMENT OUT
-        // updateLikeButtonSize(); // <<< COMMENT OUT
-        // updatePlayIndicatorSize(); // <<< COMMENT OUT
-        updateTitleStyles(); // Keep this one
-    });
-
-    // --- Hash Change Listener --- 
-    async function handleHashChange() { // <<< Make async
-        console.log("--- DEBUG: Hash changed detected ---");
-        if (!isInitialized) {
-             console.log("--- DEBUG: Skipping hash change handling, not initialized yet.");
-             return; 
+        console.log("Clearing feed (Virtualization Version)...");
+        // Stop observing elements in the pool
+        if (observer) {
+            slidePool.forEach(slide => observer.unobserve(slide));
         }
+        // We don't remove the pooled elements, maybe just hide/reset them?
+        // Or simply let initializeOrRefreshFeed handle clearing and rebuilding the pool.
+        // For simplicity now, let initializeOrRefreshFeed handle clearing the container.
+        // appContainer.innerHTML = ''; // Let initializer do this
         
-        const newFilename = window.location.hash.substring(1);
-        if (!newFilename) {
-            console.log("--- DEBUG: Hash cleared or empty. Potential: Reload to default?");
-            // window.location.reload(); // Optionally reload if hash is removed
-            return; 
-        }
-
-        console.log(`--- DEBUG: New hash filename: ${newFilename}`);
-
-        // Check if this video slide is already in the DOM
-        const existingSlide = Array.from(appContainer.querySelectorAll('.video-slide')).find(slide => {
-            const player = slide.querySelector('.video-player');
-            return player?.currentSrc?.endsWith('/' + newFilename);
-        });
-
-        if (existingSlide) {
-            // If slide exists, scroll to it and ensure it's the active one
-            console.log(`--- DEBUG: Hash target slide (${newFilename}) found in DOM. Scrolling...`);
-            existingSlide.scrollIntoView({ behavior: 'smooth' });
-            // We might need to manually trigger observer logic or wait for scroll
-             // For now, just scroll and let observer catch up.
-        } else {
-            // If slide doesn't exist, fetch its details and replace the feed
-            console.log(`--- DEBUG: Hash target slide (${newFilename}) not found in DOM. Fetching details...`);
-            try {
-                const response = await fetchWithAuth(`${API_BASE_URL}/video_details/${newFilename}`);
-                if (!response.ok) {
-                    if (response.status === 404) {
-                        alert(`Video not found: ${newFilename}`);
-                        console.error(`Video details fetch failed (404): ${newFilename}`);
-                        history.back(); // Go back if video doesn't exist
-                    } else {
-                         throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    return; // Stop if fetch failed
-                }
-                const videoData = await response.json();
-                
-                if (videoData && videoData.filename) {
-                    console.log(`--- DEBUG: Fetched details for ${newFilename}. Clearing feed and loading.`);
-                    clearFeed(); // Clear existing slides
-                    // Update videoStats cache
-                    videoStats[videoData.filename] = { 
-                        like_count: videoData.like_count,
-                        is_liked_by_user: videoData.is_liked_by_user
-                    };
-                    const newSlide = createAndAppendSlide(videoData, 0); // Create the specific slide as index 0
-                    if (newSlide) {
-                        // Ensure observer watches it
-                        if (!observer) { setupIntersectionObserver(); } 
-                        if (observer) { observer.observe(newSlide); } 
-                        // Immediately set it as active?
-                        activeSlideIndex = 0; // Manually set as active
-                        // Trigger loading of the *next* video after this one
-                        setTimeout(() => loadNextSlide([newFilename]), 250); 
-                    } else {
-                         console.error("--- DEBUG: Failed to create slide for fetched video details.");
-                         window.location.reload(); // Fallback to reload if creation fails?
-                    }
-                } else {
-                    console.error("--- DEBUG: Invalid data received from video_details endpoint.");
-                    history.back(); // Go back if data invalid
-                }
-            } catch (error) {
-                console.error("--- DEBUG: Error fetching video details for hash change:", error);
-                alert("Failed to load the requested video.");
-                history.back(); // Go back on error
-            }
-        }
+        slidePool = []; // Clear the reference array
+        activeSlideIndex = -1; // Reset active index (Now refers to DATA index)
+        loadedVideoFilenames = []; // Reset loaded list (Still useful for exclude?) - MAYBE NOT NEEDED
+        availableVideos = []; // <<< NEW: Clear the main data source
+        videoStats = {}; // Reset stats cache
+        allVideosLoaded = false;
+        hasAttemptedInitialNextLoad = false; // Reset this flag too
+        virtualScrollPosition = 0; // Reset virtual scroll tracker
+        console.log("Feed data cleared.");
     }
-    window.addEventListener('hashchange', handleHashChange);
-    // --- End Hash Change Listener ---
+
+    // --- Debounced Resize Handler --- <<< NEW
+    const handleResize = () => {
+        console.log("--- DEBUG: Handling resize event ---");
+            updateTitleStyles();
+        updateVisibleRange(); // <<< IMPORTANT: Recalculate slide positions
+    }
+    const debouncedResizeHandler = debounce(handleResize, 100); // Debounce resize events
+    window.addEventListener('resize', debouncedResizeHandler);
+    // --- End Resize Handler ---
+
+    // --- Debounced Scroll Listener for Virtualization --- <<< NEW
+    if (appContainer) {
+         const debouncedScrollHandler = debounce(updateVisibleRange, 50); // Adjust delay (ms) as needed
+         appContainer.addEventListener('scroll', debouncedScrollHandler);
+         console.log("--- DEBUG: Attached debounced scroll listener to appContainer.");
+         } else {
+         console.error("Could not attach scroll listener: appContainer not found initially.");
+     }
 
     // Wait for Firebase auth state to be ready before fully initializing
     // The onAuthStateChanged listener will call initializeOrRefreshFeed once the initial user state is known.
@@ -1419,10 +1605,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Attach listeners for login/logout buttons immediately
     loginButton.addEventListener('click', signInWithGoogle);
-    logoutButton.addEventListener('click', signOutUser);
 
     console.log("Event listeners for login/logout attached. Waiting for Auth state...");
 
     // The actual feed initialization (fetching videos etc.) now happens
     // within the onAuthStateChanged callback after the user status (logged in or out) is determined.
+
+    // --- Auth Dropdown Logic --- <<< NEW
+    if (userPfpElement && authDropdown) {
+        userPfpElement.addEventListener('click', (event) => {
+            console.log("--- DEBUG: PFP clicked! ---"); // Log that the listener fired
+            event.stopPropagation(); // Prevent potential body clicks
+            if (authDropdown) { // Double-check dropdown exists here
+                authDropdown.classList.toggle('visible');
+                console.log("--- DEBUG: Toggled dropdown visibility. Has 'visible' class:", authDropdown.classList.contains('visible'));
+        } else {
+                console.error("--- DEBUG: authDropdown element is null inside click listener!");
+            }
+        });
+    }
+
+    if (dropdownLogoutButton) {
+        dropdownLogoutButton.addEventListener('click', () => {
+             console.log("Logout button clicked in dropdown.");
+             signOutUser();
+             if (authDropdown) authDropdown.classList.remove('visible'); // Hide dropdown after click
+        });
+    }
+
+    // Optional: Hide dropdown when clicking outside
+    document.addEventListener('click', (event) => {
+        if (authDropdown && authDropdown.classList.contains('visible')) {
+            // Check if the click was outside the dropdown AND outside the PFP
+            if (!authDropdown.contains(event.target) && !userPfpElement?.contains(event.target)) {
+                authDropdown.classList.remove('visible');
+            }
+        }
+    });
+    // --- End Auth Dropdown Logic ---
 });

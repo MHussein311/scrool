@@ -36,7 +36,6 @@ body, html {
     width: 100%;
     height: 100%; /* Slide takes full height of container */
     scroll-snap-align: start;
-    position: relative;
     background-color: black;
     display: flex;
     justify-content: center;
@@ -58,6 +57,7 @@ body, html {
     width: 100%; /* Fill the container width */
     height: 100%; /* Fill the container height */
     object-fit: cover; /* Cover the area, potentially cropping */
+    border-radius: 2vh; /* Match container border radius */
 }
 
 /* Overlay to hold controls */
@@ -68,6 +68,8 @@ body, html {
     width: 100%;
     height: 100%;
     pointer-events: none; /* Allow clicks to video */
+    border-radius: 2vh; /* Match container/video border radius */
+    overflow: hidden; /* Clip children (like scrub bar) to rounded corners */
 }
 
 /* Enable pointer events ONLY for interactable elements */
@@ -137,10 +139,10 @@ body, html {
 /* --- Scrub Bar --- */
 .scrub-bar {
     position: absolute;
-    bottom: 0;
+    bottom: 0; /* Stick to the absolute bottom of the overlay */
     left: 0;
     width: 100%;
-    height: 1vh; /* 1% of viewport height */
+    height: 0.3vh; /* Thin default height */
     margin: 0;
     cursor: pointer;
     appearance: none;
@@ -148,15 +150,15 @@ body, html {
     background: rgba(200, 200, 200, 0.3);
     outline: none;
     z-index: 10;
-    opacity: 0; /* Hidden by default */
-    transition: opacity 0.3s ease-in-out; 
-    pointer-events: none; /* <<< Initially ignore pointer events */
+    opacity: 1; /* Visible by default */
+    transition: opacity 0.3s ease-in-out, height 0.3s ease-in-out; /* Transition height too */
 }
 
 /* NEW rule for JS control */
 .scrub-bar.visible {
-    opacity: 1;
-    pointer-events: auto; /* <<< Allow interaction when visible */
+    /* opacity: 1; /* Already visible by default */
+    height: 1.2vh; /* Increase height when tapped */
+    /* pointer-events: auto; /* Already auto */
 }
 
 /* Scrub bar thumb styles (simplified) */
@@ -181,15 +183,16 @@ body, html {
 /* --- Desktop Hover for Scrub Bar --- */
 @media (hover: hover) {
     .video-slide:hover .scrub-bar {
-        opacity: 1;
-        pointer-events: auto; /* Allow interaction when hovered on desktop */
+        /* opacity: 1; /* Already visible */
+        height: 1.2vh; /* Increase height on hover */
+        /* pointer-events: auto; /* Already auto */
     }
 }
 
 /* --- Video Info --- */
 .video-info {
     position: absolute;
-    bottom: 1.5vh; 
+    bottom: 2.5vh; /* Increased bottom offset to clear scrub bar reliably */
     left: 2%;      
     max-width: 80%; 
     color: white;
@@ -293,37 +296,77 @@ body, html {
     pointer-events: auto;
 }
 
-/* Minimal Auth Area Styles */
+/* --- NEW Auth Area Styles --- */
 #auth-controls {
-    position: fixed;
-    top: 1vh;
-    left: 1vw;
+    position: fixed; /* Position relative to viewport */
+    top: 2vh; /* Consistent vertical position */
+    right: 2vw; /* Position on the right side */
     z-index: 100;
-    background: rgba(0,0,0,0.7);
-    padding: 0.8vh 1.2vw;
-    border-radius: 1vh;
+    background: none; /* Remove background bar */
+    padding: 0; /* Remove padding */
     display: flex;
     align-items: center;
 }
 
-#login-button, #logout-button {
+#login-button {
     background-color: #444;
     color: white;
     border: none;
     padding: 0.8vh 1.5vw;
     border-radius: 0.5vh;
     cursor: pointer;
-    font-size: 1.5vh;
-    margin: 0 0.5vw;
+    font-size: 1.6vh; /* Slightly larger */
 }
 
 #user-info {
     display: none; /* Hidden by default */
-    align-items: center;
-    color: white;
-    font-size: 1.5vh;
+    position: relative; /* Needed for dropdown positioning */
 }
 
-#user-info span {
-    margin-right: 1vw;
-} 
+#user-pfp {
+    width: 5vh; /* PFP size */
+    height: 5vh;
+    border-radius: 50%; /* Make it round */
+    cursor: pointer;
+    display: block;
+    border: 1px solid rgba(255, 255, 255, 0.5); /* Optional subtle border */
+    background-color: #555; /* Placeholder color */
+    /* Add styling for potential default icon/initials if needed */
+}
+
+#auth-dropdown {
+    display: none; /* Hidden by default */
+    position: absolute;
+    top: 110%; /* Position below the PFP */
+    right: 0; /* Align to the right edge of the PFP container */
+    background-color: rgba(40, 40, 40, 0.95); /* Dark dropdown background */
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 0.8vh;
+    padding: 1vh;
+    min-width: 150px; /* Minimum width */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 101; /* Above #auth-controls */
+}
+
+#auth-dropdown.visible {
+    display: block; /* Show dropdown */
+}
+
+#auth-dropdown button {
+    display: block;
+    width: 100%;
+    background: none;
+    border: none;
+    color: white;
+    padding: 1vh 1.5vh;
+    text-align: left;
+    font-size: 1.6vh;
+    cursor: pointer;
+    border-radius: 0.5vh;
+}
+
+#auth-dropdown button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* --- END NEW Auth Area Styles --- */ 
